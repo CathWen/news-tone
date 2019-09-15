@@ -3,10 +3,9 @@ import os
 import requests
 from openpyxl import Workbook 
 from openpyxl import load_workbook
-#import xlsxwriter
 import pandas as pd
+import numpy as np
 from retry import retry
-#from lxml import etree
 from bs4 import BeautifulSoup
 from aip import AipNlp
 from pprint import pprint
@@ -48,7 +47,10 @@ def getcontent(url):
     '''
     if pagetype != 1:
         title = web.title.string
-        sent_title = client.sentimentClassify(title)
+        #title.replace("\xa0"," ")
+        #title.encode("gbk","ignore").decode("gbk","replace")
+        sent_title_origin = client.sentimentClassify(title)
+        sent_title = sent_title_origin["items"][0]
     #keyword = client.keyword(title)    
 
     else:
@@ -56,7 +58,6 @@ def getcontent(url):
         sent_title = {'positive_prob': 0, 'confidence': 0, 'negative_prob': 0, 'sentiment': 0}
         #print(title)
 
-        
     '''
     if pagetype:
         depths = web.find_all("a", attrs = {"href" : "/depth"})
@@ -159,12 +160,99 @@ def getcontent(url):
                             break                        
                 writer_k += 1
                 content = content + c
-        #keyword = client.keyword(content)    
-        sent_content = client.sentimentClassify(content)
-        #sent_content_list = list(sent_content.values()) 字典转列表
-        #print(content)
 
-    list_content = [url,articletype, title, date, time, writer, media, origin, readnum, content, sent_title["positive_prob"], sent_title["confidence"], sent_title["negative_prob"], sent_title["negative_prob"], sent_title["sentiment"], sent_content["positive_prob"],sent_content["confidence"],sent_content["negative_prob"],sent_content["sentiment"]]
+        #keyword = client.keyword(content)
+        content.replace(u'\xa0',u"")
+        content.replace(" ","")
+        error_report = 0
+        content = ''.join(content.split())
+        n = len(content)//1024
+        #print(len(content)/1024)
+        if len(content)/1024 > 1:
+            content = content[0:1023]
+        try:
+            sent_content = client.sentimentClassify(content)
+        except:
+            print("错误")
+            return
+        if "items" in sent_content.keys():
+            sent_content_items = sent_content["items"][0]
+            [a,b,c,d]=list(sent_content_items.values())
+        else:
+            [a,b,c,d] = ["","","",""]
+        '''
+        if (len(content)/1024) >1: #如果文本太大，分割加权
+            #temp_sent_content_dict = {'positive_prob':0,'cofidence':0,'negative_prob':0,'sentiment':0}
+            sent_content_list=[0,0,0,0]
+            for i in range(0,n+1):
+                if ((i+1)*1024) >len(content):
+                    temp_content = content[i*1024:]
+                    #print(temp_content)
+                    #print("last time")
+                    try:
+                        temp_sent_content = client.sentimentClassify(temp_content)
+                        print("最后一次，能够获得")
+                        #print(temp_sent_content["items"][0])
+                    except: 
+                        list_content = []
+                        error_report += 1 
+                        print("调用错误：\xa0；错误次数" + str(error_report))
+                        return list_content                        
+                else:
+                    temp_content = content[i*1024:(i+1)*1024-1]
+                    try:
+                        temp_sent_content = client.sentimentClassify(temp_content)
+                        print("其中一次，能够获得")
+                    except: 
+                        list_content = []
+                        error_report += 1 
+                        print("调用错误：\xa0；错误次数" + str(error_report))
+                        return list_content 
+                
+                temp_dict = temp_sent_content["items"][0] 
+                temp_sent_content_list = list(temp_dict.values())
+                #取到items里面的字典
+                sent_content_list = [sent_content_list[i]+temp_sent_content_list[i] for i in range(0,3)]
+                #[a,b,c,d] = sent_content_list
+                print(sent_content_list)
+                #print(temp_dict,len(temp_content),len(content)) #字典相加
+                #temp_sent_content_dict['positive_prob'] += temp_dict['positive_prob']*len(temp_content)/len(content)
+                #temp_sent_content_dict['cofidence'] += temp_dict['confidence']*len(temp_content)/len(content)
+                #temp_sent_content_dict['negative_prob'] += temp_dict['negative_prob']*len(temp_content)/len(content)
+                #temp_sent_content_dict['sentiment'] += temp_dict['sentiment']*len(temp_content)/len(content)
+            #sent_content = temp_sent_content_dict
+            #print(sent_content)
+            
+        else:
+            try:
+                sent_content = client.sentimentClassify(content)
+            except:
+                list_content = []
+                error_report += 1 
+                print("调用错误：\xa0；错误次数" + str(error_report))
+                return list_content
+            sent_content = sent_content["items"][0]
+            [a,b,c,d] = list(sent_content.values())
+        '''
+
+    list_content = [url,articletype, title, date, time, writer, media, origin, readnum, content, sent_title["positive_prob"], sent_title["confidence"], sent_title["negative_prob"], sent_title["sentiment"], a,b,c,d]
+    
+    code_list = find_stkcd(content) #匹配企业名称
+    macro = 0
+    market = 0
+    if code_list :
+        list_content.append(macro)
+        list_content.append(market)
+        for related_code in code_list:
+            list_content.append(related_code)
+    elif find_macro(content) == 1:  #匹配宏观
+        macro = find_macro(content)
+        list_content.append(macro)
+        list_content.append(market)
+    else : #匹配市场
+        list_content.append(macro)
+        list_content.append(market)   
+    
     print(list_content)
     return list_content
     #return articletype, title, date, time, writer, media, readnum, content
@@ -179,12 +267,58 @@ def savexlsx(r,list_content):
     
     wb.save("财联社新闻汇总.xlsx")
 
+def find_stkcd(content): #寻找匹配的企业名字
+    data = pd.read_csv("codenum.csv",usecols = [0],encoding="utf-8")
+    name = pd.read_csv("codenum.csv",usecols=[1],encoding="utf-8")
+    #print(data)
+    code_list_numpy = np.array(data)
+    code_list_origin = code_list_numpy.tolist()
+    name_list_nummpy = np.array(name)
+    name_list_origin = name_list_nummpy.tolist()
+    #print(type(code_list))
+    code_list_new = []
+    for itemlist in code_list_origin:
+        for item in itemlist:
+            code_list_new.append(item)
+    code_list = []
+    name_list = []
+    for item in code_list_new:
+        code = "%06d" %item
+        code = str(code)
+        if code in content: #content 在list_content 中的位置为第10列  
+            code_list.append(code) 
+    for namelist in name_list_origin:
+        for name in namelist:
+            name_list.append(name)
+            if name in content:
+                p = name_list.index(name)
+                code_list.append(code_list_new[p])
+    return code_list
+
+def find_macro(content): #判断是否宏观信息
+    macro = 0
+    macro_data = pd.read_csv("宏观经济新闻词汇.csv",encoding="utf-8")
+    macro_word_list_nummy = np.array(macro_data)
+    macro_word_lsit_origin = macro_word_list_nummy.tolist()
+    for itemlist in macro_word_lsit_origin:
+        for item in itemlist:
+            if item in content:
+                macro = 1
+    return macro
+
+def find_market_news(content): #判断是否市场行情信息
+    market = 0
+    market_data =["沪深两市","创业板","A股","深成指"]
+    for item in market_data:
+        if item in content:
+            market = 1
+    return market
 
 def main():
     url_head = "https://www.cls.cn/depth/"
     wb = Workbook() 
     sheet = wb.active
-    label_list =["url","articletype", "title", "date", "time", "writer", "media", "origin", "readnum", "content", "sent_title_positive_prob", "sent_title_confidence", "sent_title_negative_prob", "sent_title_negative_prob", "sent_title_sentiment", "sent_content_positive_prob","sent_content_confidence","sent_content_negative_prob","sent_content_sentiment"]
+    label_list =["url","articletype", "title", "date", "time", "writer", "media", "origin", "readnum", "content", "sent_title_positive_prob", "sent_title_confidence", "sent_title_negative_prob", "sent_title_negative_prob", "sent_title_sentiment", "sent_content_positive_prob","sent_content_confidence","sent_content_negative_prob","sent_content_sentiment","macro","market","code"]
     c = 1
     for item in label_list:
         sheet.cell(row = 1, column = c).value = item 
@@ -195,13 +329,18 @@ def main():
     for i in range(229,400) : 
         url_tail = "%06d" %i #补齐前面的0
         url_tail = str(url_tail)
-        url = url_head + url_tail    
+        url = url_head + "000330"    
         list_content = getcontent(url)
+        print(list_content)
+        
         if list_content == []:
+            continue
+        elif list_content ==None:
             continue
         else:
             savexlsx(r,list_content)
             r += 1
+        
 
 if __name__ == "__main__":
     main()
